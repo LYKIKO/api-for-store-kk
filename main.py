@@ -5,13 +5,14 @@ from typing import List, Optional, Dict, Any
 import json
 import os
 from datetime import datetime
-import uvicorn
+from pathlib import Path
+
 app = FastAPI(title="Product Stock API", version="1.0.0")
 
-# Configure CORS
+# Configure CORS for Vercel
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,21 +32,19 @@ class Product(BaseModel):
     delivery_method: str
     stock: List[StockItem]
 
-class CategoryProducts(BaseModel):
-    category_name: str
-    products: List[Product]
+# File paths - use absolute paths for Vercel
+BASE_DIR = Path(__file__).parent
+STOCK_FILE = BASE_DIR / "data" / "stock.json"
+BACKUP_DIR = BASE_DIR / "data" / "backups"
 
-# File paths
-STOCK_FILE = "stock.json"
-BACKUP_DIR = "backups"
-
-# Ensure backup directory exists
-os.makedirs(BACKUP_DIR, exist_ok=True)
+# Ensure data directory exists
+STOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_stock_data():
     """Load stock data from JSON file"""
     try:
-        if os.path.exists(STOCK_FILE):
+        if STOCK_FILE.exists():
             with open(STOCK_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
         else:
@@ -93,9 +92,9 @@ def save_stock_data(data: Dict[str, Any]):
     """Save stock data to JSON file with backup"""
     try:
         # Create backup
-        if os.path.exists(STOCK_FILE):
+        if STOCK_FILE.exists():
             backup_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_file = os.path.join(BACKUP_DIR, f"stock_backup_{backup_time}.json")
+            backup_file = BACKUP_DIR / f"stock_backup_{backup_time}.json"
             with open(STOCK_FILE, 'r') as original, open(backup_file, 'w') as backup:
                 backup.write(original.read())
         
@@ -112,6 +111,7 @@ async def root():
     return {
         "message": "Product Stock API",
         "version": "1.0.0",
+        "status": "running",
         "endpoints": {
             "GET /api/products": "Get all products",
             "GET /api/products/{product_id}": "Get specific product",
@@ -119,6 +119,7 @@ async def root():
             "GET /api/categories/{category_name}": "Get products by category",
             "GET /api/stock/{product_id}": "Get stock count for product",
             "POST /api/stock/consume/{product_id}": "Consume one stock item",
+            "GET /api/dashboard": "Get dashboard statistics",
             "GET /api/health": "Health check endpoint"
         }
     }
@@ -128,7 +129,11 @@ async def health_check():
     """Health check endpoint"""
     try:
         load_stock_data()
-        return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+        return {
+            "status": "healthy", 
+            "timestamp": datetime.now().isoformat(),
+            "service": "Product Stock API"
+        }
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
@@ -140,11 +145,7 @@ async def get_all_products():
         all_products = []
         
         for category, products in stock_data.items():
-            for product in products:
-                # Add stock_count field for convenience
-                product_with_count = product.copy()
-                product_with_count["stock_count"] = len(product["stock"])
-                all_products.append(product_with_count)
+            all_products.extend(products)
         
         return all_products
     except Exception as e:
@@ -184,7 +185,7 @@ async def get_categories():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/categories/{category_name}", response_model=List[Product])
+@app.get("/api/categories/{category_name}")
 async def get_products_by_category(category_name: str):
     """Get products by category name"""
     try:
@@ -196,7 +197,10 @@ async def get_products_by_category(category_name: str):
                 detail=f"Category '{category_name}' not found"
             )
         
-        return stock_data[category_name]
+        return {
+            "category": category_name,
+            "products": stock_data[category_name]
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -249,6 +253,7 @@ async def consume_stock_item(product_id: int):
                             "success": True,
                             "product_id": product_id,
                             "product_name": product["name"],
+                            "category": category,
                             "consumed_license": consumed_license,
                             "remaining_stock": len(product["stock"]),
                             "message": "Stock item consumed successfully"
@@ -296,16 +301,13 @@ async def get_dashboard_stats():
             "total_products": total_products,
             "total_stock_items": total_stock,
             "low_stock_products": low_stock_products,
-            "low_stock_count": len(low_stock_products)
+            "low_stock_count": len(low_stock_products),
+            "updated_at": datetime.now().isoformat()
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# For Vercel, we need to expose the app object
 if __name__ == "__main__":
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
